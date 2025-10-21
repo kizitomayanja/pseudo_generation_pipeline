@@ -1,145 +1,80 @@
-"""
-Medical Translation Evaluation Pipeline
-----------------------------------------
-This script:
-1. Generates pseudo-medical English sentences using an LLM.
-2. Translates each sentence using multiple translation models.
-3. Back-translates to English.
-4. Scores translations via BLEU + semantic similarity.
-5. Saves the best translations to a CSV file.
-
-Replace the translation stubs with actual model/API calls.
-"""
-
 import os
 import time
-import pandas as pd
-import numpy as np
+from openai import OpenAI
 from tqdm import tqdm
-from sacrebleu import corpus_bleu
-from sentence_transformers import SentenceTransformer, util
 
-# ============================================
-# 1. CONFIGURATION
-# ============================================
-
-OUTPUT_FILE = "best_medical_translations.csv"
-NUM_SENTENCES = 10000
-TARGET_LANG = "lg"  # Luganda (example)
-BATCH_SIZE = 100
-SLEEP_BETWEEN_BATCHES = 2  # to avoid API rate limits
-
-# Initialize similarity model
-semantic_model = SentenceTransformer("paraphrase-MiniLM-L6-v2")
-
-# ============================================
-# 2. SENTENCE GENERATION (LLM)
-# ============================================
-
-def generate_medical_sentences(num_sentences=100):
+def generate_medical_sentences(
+    output_file="medical_sentences.txt",
+    target_count=10000,
+    batch_size=10,
+    sleep_time=2,
+    model="gpt-3.5-turbo",
+    temperature=0.8
+):
     """
-    Replace this stub with an actual LLM call (e.g., OpenAI, HF pipeline, or local model).
-    Here we mock synthetic data for demonstration.
+    Generates realistic medical sentences using the OpenAI API and saves them to a text file.
+
+    Parameters:
+        output_file (str): File to save generated sentences.
+        target_count (int): Total number of sentences to generate.
+        batch_size (int): Number of sentences to request per API call.
+        sleep_time (int): Delay between API calls (seconds).
+        model (str): OpenAI model to use.
+        temperature (float): Sampling temperature for variation.
+
+    Notes:
+        - The function resumes automatically if the file already contains sentences.
+        - Duplicate sentences are avoided.
     """
-    base_examples = [
-        "The patient has a persistent cough and fever.",
-        "Blood pressure readings remain abnormally high.",
-        "The doctor recommended an MRI to assess the damage.",
-        "Symptoms suggest a possible respiratory infection.",
-        "The wound was cleaned and covered with a sterile dressing."
-    ]
-    # Expand pseudo-randomly
-    sentences = [f"{ex.split()[0]} {i}: {ex}" for i, ex in enumerate(np.random.choice(base_examples, num_sentences, replace=True))]
-    return list(set(sentences))[:num_sentences]
 
-# ============================================
-# 3. TRANSLATION MODEL WRAPPERS (STUBS)
-# ============================================
+    client = OpenAI()
 
-def translate_google(sentence, target_lang="lg"):
-    """Stub for Google Translate API"""
-    # Replace with googletrans or official API call
-    return f"[Google-{target_lang}] {sentence}"
+    # Resume from existing file if available
+    if os.path.exists(output_file):
+        with open(output_file, "r", encoding="utf-8") as f:
+            existing_sentences = [line.strip() for line in f if line.strip()]
+    else:
+        existing_sentences = []
 
-def translate_sunbird(sentence):
-    """Stub for Sunbird Sunflower model"""
-    # Replace with actual Hugging Face inference call
-    return f"[Sunbird] {sentence}"
+    start_index = len(existing_sentences)
+    print(f"[INFO] Found {start_index} existing sentences. Resuming generation...")
 
-def translate_local_nllb(sentence, target_lang="lg"):
-    """Stub for NLLB-200 or MBART local translation"""
-    # Replace with your loaded model's generate() call
-    return f"[NLLB-{target_lang}] {sentence}"
+    # Prompt for generation
+    PROMPT = """Generate 10 short, unique, realistic medical sentences.
+Each sentence should describe a diagnosis, symptom, procedure, or observation.
+Examples:
+- The CT scan revealed a small tumor in the left lung.
+- The patient reported persistent chest pain and shortness of breath.
+- The X-ray showed multiple rib fractures.
+Now write 10 new sentences like these in simple, clear medical language.
+"""
 
-# Back-translation (can use English versions of the same models)
-def back_translate(sentence, source_lang="lg"):
-    """Stub for back-translation"""
-    # In practice, reverse the source/target or use a separate model
-    return sentence.replace(f"[{source_lang}]", "[EN]")
+    # Open output file for appending
+    with open(output_file, "a", encoding="utf-8") as f:
+        for i in tqdm(range(start_index, target_count, batch_size), desc="Generating"):
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": PROMPT}],
+                    temperature=temperature
+                )
 
-# ============================================
-# 4. EVALUATION FUNCTION
-# ============================================
+                sentences = response.choices[0].message.content.strip().split("\n")
+                sentences = [s.strip("-•1234567890. ").strip() for s in sentences if s.strip()]
 
-def evaluate_translation(original, translations):
-    """
-    Evaluates translations by BLEU + semantic similarity of back-translation.
-    Returns the best model name and its score.
-    """
-    scores = {}
-    for name, trans in translations.items():
-        back = back_translate(trans)
-        bleu = corpus_bleu([back], [[original]]).score
-        sim = util.cos_sim(
-            semantic_model.encode(original),
-            semantic_model.encode(back)
-        ).item()
-        # Weighted score
-        final_score = 0.7 * bleu + 0.3 * sim * 100
-        scores[name] = final_score
-    best_model = max(scores, key=scores.get)
-    return best_model, scores
+                new_sentences = [s for s in sentences if s and s not in existing_sentences]
 
-# ============================================
-# 5. MAIN PIPELINE
-# ============================================
+                for s in new_sentences:
+                    f.write(s + "\n")
+                    existing_sentences.append(s)
 
-def main():
-    print("Generating pseudo-medical sentences...")
-    sentences = generate_medical_sentences(NUM_SENTENCES)
+                f.flush()
+                time.sleep(sleep_time)
 
-    results = []
+            except Exception as e:
+                print(f"[ERROR] {e}")
+                print("[INFO] Retrying in 10 seconds...")
+                time.sleep(10)
+                continue
 
-    for i in tqdm(range(0, len(sentences), BATCH_SIZE)):
-        batch = sentences[i:i + BATCH_SIZE]
-        for original in batch:
-            # Run translations
-            translations = {
-                "google": translate_google(original, TARGET_LANG),
-                "sunbird": translate_sunbird(original),
-                "nllb": translate_local_nllb(original, TARGET_LANG)
-            }
-
-            # Evaluate
-            best_model, scores = evaluate_translation(original, translations)
-
-            results.append({
-                "original": original,
-                "best_model": best_model,
-                "best_translation": translations[best_model],
-                "scores": scores
-            })
-
-        # Periodically save progress
-        pd.DataFrame(results).to_csv(OUTPUT_FILE, index=False)
-        print(f"Saved progress at {len(results)} sentences...")
-        time.sleep(SLEEP_BETWEEN_BATCHES)
-
-    print("✅ Done! Results saved to:", OUTPUT_FILE)
-
-# ============================================
-# 6. ENTRY POINT
-# ============================================
-
-if __name__ == "__main__":
-    main()
+    print(f"[DONE] Saved {len(existing_sentences)} sentences to {output_file}")
