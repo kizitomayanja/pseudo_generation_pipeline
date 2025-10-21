@@ -1,79 +1,80 @@
-"""
-Medical Translation Evaluation Pipeline
-----------------------------------------
-This script:
-1. Generates pseudo-medical English sentences using an LLM.
-2. Translates each sentence using multiple translation models.
-3. Back-translates to English.
-4. Scores translations via BLEU + semantic similarity.
-5. Saves the best translations to a CSV file.
-
-Replace the translation stubs with actual model/API calls.
-"""
-
-import numpy as np
-import openai
-import re
-
-# Make sure your API key is set:
-# export OPENAI_API_KEY="sk-xxxx"
-# or in Windows: setx OPENAI_API_KEY "sk-xxxx"
+import os
+import time
+from openai import OpenAI
+from tqdm import tqdm
 
 def generate_medical_sentences(
-    num_sentences=10000,
-    batch_size=50,
+    output_file="medical_sentences.txt",
+    target_count=10000,
+    batch_size=10,
+    sleep_time=2,
     model="gpt-3.5-turbo",
-    max_tokens=100,
-    temperature=0.7
+    temperature=0.8
 ):
     """
-    Efficiently generate a large number of medical sentences using OpenAI API.
-    
+    Generates realistic medical sentences using the OpenAI API and saves them to a text file.
+
     Parameters:
-    - num_sentences: total number of sentences to generate
-    - batch_size: how many sentences per API call
-    - model: OpenAI model
-    - max_tokens: max tokens per batch
-    - temperature: randomness for variety
-    
-    Returns:
-    - list of unique sentences
+        output_file (str): File to save generated sentences.
+        target_count (int): Total number of sentences to generate.
+        batch_size (int): Number of sentences to request per API call.
+        sleep_time (int): Delay between API calls (seconds).
+        model (str): OpenAI model to use.
+        temperature (float): Sampling temperature for variation.
+
+    Notes:
+        - The function resumes automatically if the file already contains sentences.
+        - Duplicate sentences are avoided.
     """
-    sentences = set()
-    while len(sentences) < num_sentences:
-        # Prompt instructs the model to generate multiple numbered sentences
-        prompt = (
-            f"Generate {batch_size} concise, realistic medical sentences in English. "
-            "Focus on General Medicine and diagnosis, covering different symptoms, tests, "
-            "medications, or procedures. Output as a numbered list."
-        )
-        try:
-            response = openai.ChatCompletion.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=temperature,
-                n=1
-            )
-            text = response.choices[0].message['content'].strip()
 
-            # Extract sentences from numbered list
-            batch_sentences = re.split(r'\d+\.\s+', text)
-            batch_sentences = [s.strip() for s in batch_sentences if s.strip()]
+    client = OpenAI()
 
-            sentences.update(batch_sentences)
-        except Exception as e:
-            print(f"[Error generating batch]: {e}")
-            continue
+    # Resume from existing file if available
+    if os.path.exists(output_file):
+        with open(output_file, "r", encoding="utf-8") as f:
+            existing_sentences = [line.strip() for line in f if line.strip()]
+    else:
+        existing_sentences = []
 
-        print(f"[INFO] Collected {len(sentences)}/{num_sentences} sentences...")
+    start_index = len(existing_sentences)
+    print(f"[INFO] Found {start_index} existing sentences. Resuming generation...")
 
-    return list(sentences)[:num_sentences]
+    # Prompt for generation
+    PROMPT = """Generate 10 short, unique, realistic medical sentences.
+Each sentence should describe a diagnosis, symptom, procedure, or observation.
+Examples:
+- The CT scan revealed a small tumor in the left lung.
+- The patient reported persistent chest pain and shortness of breath.
+- The X-ray showed multiple rib fractures.
+Now write 10 new sentences like these in simple, clear medical language.
+"""
 
+    # Open output file for appending
+    with open(output_file, "a", encoding="utf-8") as f:
+        for i in tqdm(range(start_index, target_count, batch_size), desc="Generating"):
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": PROMPT}],
+                    temperature=temperature
+                )
 
+                sentences = response.choices[0].message.content.strip().split("\n")
+                sentences = [s.strip("-•1234567890. ").strip() for s in sentences if s.strip()]
 
-if __name__ == "__main__":
-    # Test sentence generation
-    generated_sentences = generate_medical_sentences(10)
-    for sent in generated_sentences:
-        print(sent)
+                new_sentences = [s for s in sentences if s and s not in existing_sentences]
+
+                for s in new_sentences:
+                    f.write(s + "\n")
+                    existing_sentences.append(s)
+
+                f.flush()
+                time.sleep(sleep_time)
+
+            except Exception as e:
+                print(f"[ERROR] {e}")
+                print("[INFO] Retrying in 10 seconds...")
+                time.sleep(10)
+                continue
+
+    print(f"[DONE] Saved {len(existing_sentences)} sentences to {output_file}")

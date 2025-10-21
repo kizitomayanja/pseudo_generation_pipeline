@@ -1,6 +1,7 @@
 
 from translators import translate_google, translate_sunbird
 from evaluate import evaluate_translation
+from generate_data import generate_medical_sentences
 import time
 import pandas as pd
 from tqdm import tqdm

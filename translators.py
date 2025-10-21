@@ -1,6 +1,13 @@
 from deep_translator import GoogleTranslator
-from load_model import sunbird_model, tokenizer, DEVICE, SYSTEM_MESSAGE, RETRY_COUNT, RETRY_DELAY_SECONDS
+from transformers import NllbTokenizer, M2M100ForConditionalGeneration
+import torch
 import time
+
+# GLOBAL CACHED MODEL OBJECTS
+_sunbird_model = None
+_sunbird_tokenizer = None
+_sunbird_lang_tokens = None
+_DEVICE = None
 
 # GOOGLE TRANSLATE FUNCTION
 def translate_google(sentence, target_lang="lg"):
@@ -11,79 +18,67 @@ def translate_google(sentence, target_lang="lg"):
         print(f"[Google Translate Error] {e}")
         return None
 
-# SUNBIRD SUNFLOWER FUNCTION
-def translate_sunbird(sentence: str, source_lang: str = "en", target_lang: str = "lg", max_new_tokens: int = 500):
-    """
-    Translate text from source_lang → target_lang using the Sunbird Sunflower chat-style prompt.
-    Automatically runs on CUDA, MPS, or CPU.
-    """
-    lang_map_human = {
-        "en": "English",
-        "lg": "Luganda",
-    }
-    src_human = lang_map_human.get(source_lang, source_lang)
-    tgt_human = lang_map_human.get(target_lang, target_lang)
-    instruction = f"Translate from {src_human} to {tgt_human}: {sentence}"
 
-    messages = [
-        {"role": "system", "content": SYSTEM_MESSAGE},
-        {"role": "user", "content": instruction},
-    ]
+# SUNBIRD TRANSLATION FUNCTION (Lightweight Model)
+def translate_sunbird(sentence: str, source_lang: str = "eng", target_lang: str = "lug", max_new_tokens: int = 100):
+    """
+    Translate text from source_lang → target_lang using the lightweight Sunbird NLLB model.
+    Automatically runs on CUDA, MPS, or CPU. Model is cached after first load.
+    """
+    global _sunbird_model, _sunbird_tokenizer, _sunbird_lang_tokens, _DEVICE
 
     try:
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    except Exception as e:
-        print(f"[Sunbird] Chat template not available ({e}); using fallback prompt.")
-        prompt = f"{SYSTEM_MESSAGE}\n\nUser: {instruction}\nAssistant:"
-
-    # Tokenize input and move to device
-    inputs = tokenizer([prompt], return_tensors="pt")
-    inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
-
-    # Try generation with retries
-    for attempt in range(RETRY_COUNT + 1):
-        try:
-            outputs = sunbird_model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                num_beams=5,
-                do_sample=True,
-                temperature=0.5,
+        # === Step 1: Load model/tokenizer only once ===
+        if _sunbird_model is None or _sunbird_tokenizer is None:
+            print("[Sunbird] Loading translation model...")
+            _DEVICE = torch.device(
+                "cuda" if torch.cuda.is_available()
+                else "mps" if torch.backends.mps.is_available()
+                else "cpu"
             )
+            print(f"[Sunbird] Using device: {_DEVICE}")
 
-            input_len = inputs["input_ids"].shape[1]
-            generated_ids = outputs[0][input_len:]
-            response = tokenizer.decode(generated_ids, skip_special_tokens=True)
-            return response.strip()
-        except RuntimeError as e:
-            print(f"[Sunbird] RuntimeError (attempt {attempt+1}/{RETRY_COUNT+1}): {e}")
-            if attempt < RETRY_COUNT:
-                time.sleep(RETRY_DELAY_SECONDS)
-            else:
-                return None
-        except Exception as e:
-            print(f"[Sunbird] Error (attempt {attempt+1}/{RETRY_COUNT+1}): {e}")
-            if attempt < RETRY_COUNT:
-                time.sleep(RETRY_DELAY_SECONDS)
-            else:
-                return None
+            _sunbird_tokenizer = NllbTokenizer.from_pretrained("Sunbird/translate-nllb-1.3b-salt")
+            _sunbird_model = M2M100ForConditionalGeneration.from_pretrained(
+                "Sunbird/translate-nllb-1.3b-salt"
+            ).to(_DEVICE)
+
+            # Mapping of Sunbird’s language tokens
+            _sunbird_lang_tokens = {
+                'eng': 256047,
+                'ach': 256111,
+                'lgg': 256008,
+                'lug': 256110,
+                'nyn': 256002,
+                'teo': 256006,
+            }
+
+        # === Step 2: Prepare input ===
+        inputs = _sunbird_tokenizer(sentence, return_tensors="pt").to(_DEVICE)
+        inputs["input_ids"][0][0] = _sunbird_lang_tokens.get(source_lang, 256047)
+
+        # === Step 3: Generate translation ===
+        translated_tokens = _sunbird_model.generate(
+            **inputs,
+            forced_bos_token_id=_sunbird_lang_tokens.get(target_lang, 256110),
+            max_length=max_new_tokens,
+            num_beams=5,
+        )
+
+        result = _sunbird_tokenizer.batch_decode(
+            translated_tokens, skip_special_tokens=True
+        )[0]
+        return result.strip()
+
+    except Exception as e:
+        print(f"[Sunbird Translation Error] {e}")
+        return None
+
 
 # BACK-TRANSLATION FUNCTION
-def back_translate(sentence, source_lang="lg", model="google"):
+def back_translate(sentence, source_lang="lug", model="google"):
     """
     Back-translate a sentence from source_lang → English.
-    
-    Parameters:
-    - sentence: str, sentence in source language
-    - source_lang: 'lg' or other code
-    - model: 'google' or 'sunbird'
-    
-    Returns:
-    - str: back-translated sentence in English
     """
     if model.lower() == "google":
         try:
@@ -93,17 +88,20 @@ def back_translate(sentence, source_lang="lg", model="google"):
             return None
     elif model.lower() == "sunbird":
         try:
-            # Use the translate_sunbird function we defined earlier
-            return translate_sunbird(sentence, source_lang=source_lang, target_lang="en")
+            return translate_sunbird(sentence, source_lang=source_lang, target_lang="eng")
         except Exception as e:
             print(f"[Sunbird Back-translate Error] {e}")
             return None
     else:
         raise ValueError("Unknown model. Choose 'google' or 'sunbird'.")
 
-# Example usage
+
+# === Example usage ===
 if __name__ == "__main__":
     text = "The patient has a high fever and persistent cough."
-    translation = translate_google(text, target_lang="lg")
-    print(f"Google Translation: {translation}\n")
-    print(f"Sunbird Translation: {translate_sunbird(text, source_lang='en', target_lang='lg')}\n")
+
+    print("\nGoogle Translation:")
+    print(translate_google(text, target_lang="lg"))
+
+    print("\nSunbird Translation:")
+    print(translate_sunbird(text, source_lang="eng", target_lang="lug"))
