@@ -20,7 +20,8 @@ SLEEP_BETWEEN_BATCHES = 2  # to avoid API rate limits
 
 def main():
     print("Generating pseudo-medical sentences...")
-    sentences = generate_medical_sentences(NUM_SENTENCES)
+    output = "medical_sentences.txt"
+    sentences = generate_medical_sentences(output_file=output)
 
     results = []
 
